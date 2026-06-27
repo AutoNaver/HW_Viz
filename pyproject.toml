@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hw-viz"
+version = "0.1.0"
+description = "Hull-White interactive rate simulation MVP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=2.0",
+  "pandas>=2.0",
+  "scipy>=1.14",
+  "streamlit>=1.40",
+  "plotly>=5.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["hw_viz*"]
+
+[tool.setuptools.package-data]
+"hw_viz.components.draggable_chart" = ["*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

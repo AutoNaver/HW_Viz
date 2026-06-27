@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      font-family: "Source Sans Pro", system-ui, -apple-system, sans-serif;
+      color: inherit;
+    }
+    #wrap { width: 100%; }
+    svg { display: block; width: 100%; touch-action: none; }
+    .axis { stroke: #9aa0a6; stroke-width: 1; }
+    .grid { stroke: #e6e6e6; stroke-width: 1; }
+    .tick-label { fill: #5f6368; font-size: 11px; }
+    .axis-label { fill: #3c4043; font-size: 12px; font-weight: 600; }
+    .title { fill: #202124; font-size: 14px; font-weight: 700; }
+    .anchor { cursor: grab; }
+    .anchor.dragging { cursor: grabbing; }
+    .hint { fill: #80868b; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div id="wrap"><svg id="chart"></svg></div>
+  <script>
+    // ----- Streamlit manual component protocol -------------------------------
+    function send(type, data) {
+      const msg = Object.assign({ isStreamlitMessage: true, type: type }, data || {});
+      window.parent.postMessage(msg, "*");
+    }
+    function setFrameHeight(h) { send("streamlit:setFrameHeight", { height: h }); }
+    function setValue(value) {
+      send("streamlit:setComponentValue", { value: value, dataType: "json" });
+    }
+
+    let SPEC = null;
+    let EVENT = 0;            // monotonically increasing drag-event id
+    let anchors = [];        // working copy of anchor positions
+    let dragIndex = -1;
+    const SVGNS = "http://www.w3.org/2000/svg";
+    const svg = document.getElementById("chart");
+
+    const margin = { top: 34, right: 18, bottom: 42, left: 54 };
+
+    function size() {
+      const width = Math.max(280, window.innerWidth || document.body.clientWidth || 360);
+      const height = (SPEC && SPEC.height) ? SPEC.height : 320;
+      return { width, height };
+    }
+
+    // ----- scales ------------------------------------------------------------
+    function makeScale(domain, range, type) {
+      const [d0, d1] = domain;
+      const [r0, r1] = range;
+      if (type === "log") {
+        const l0 = Math.log(d0), l1 = Math.log(d1);
+        const fwd = v => r0 + (Math.log(v) - l0) / (l1 - l0) * (r1 - r0);
+        const inv = p => Math.exp(l0 + (p - r0) / (r1 - r0) * (l1 - l0));
+        return { fwd, inv };
+      }
+      const fwd = v => r0 + (v - d0) / (d1 - d0) * (r1 - r0);
+      const inv = p => d0 + (p - r0) / (r1 - r0) * (d1 - d0);
+      return { fwd, inv };
+    }
+
+    function niceTicks(d0, d1, count) {
+      const span = d1 - d0;
+      if (span <= 0) return [d0];
+      const raw = span / count;
+      const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+      const norm = raw / mag;
+      let step;
+      if (norm < 1.5) step = 1; else if (norm < 3) step = 2; else if (norm < 7) step = 5; else step = 10;
+      step *= mag;
+      const start = Math.ceil(d0 / step) * step;
+      const ticks = [];
+      for (let v = start; v <= d1 + step * 1e-6; v += step) ticks.push(Number(v.toFixed(10)));
+      return ticks;
+    }
+
+    function el(name, attrs, parent) {
+      const node = document.createElementNS(SVGNS, name);
+      for (const k in attrs) node.setAttribute(k, attrs[k]);
+      if (parent) parent.appendChild(node);
+      return node;
+    }
+
+    // ----- rendering ---------------------------------------------------------
+    let xScale, yScale, plot;
+
+    function render() {
+      if (!SPEC) return;
+      const { width, height } = size();
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.setAttribute("width", width);
+      svg.setAttribute("height", height);
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+      plot = {
+        x0: margin.left,
+        x1: width - margin.right,
+        y0: height - margin.bottom,
+        y1: margin.top,
+      };
+      const xType = SPEC.xType || "linear";
+      const yType = SPEC.yType || "linear";
+      xScale = makeScale(SPEC.xRange, [plot.x0, plot.x1], xType);
+      yScale = makeScale(SPEC.yRange, [plot.y0, plot.y1], yType);
+
+      // gridlines + ticks
+      const xTicks = SPEC.xTicks || niceTicks(SPEC.xRange[0], SPEC.xRange[1], 6);
+      const yTicks = SPEC.yTicks || niceTicks(SPEC.yRange[0], SPEC.yRange[1], 5);
+      const xFmt = SPEC.xType === "log" ? (v => formatNum(v)) : (v => formatNum(v));
+
+      for (const t of yTicks) {
+        const py = yScale.fwd(t);
+        el("line", { class: "grid", x1: plot.x0, x2: plot.x1, y1: py, y2: py }, svg);
+        const lbl = el("text", { class: "tick-label", x: plot.x0 - 8, y: py + 4, "text-anchor": "end" }, svg);
+        lbl.textContent = formatNum(t);
+      }
+      xTicks.forEach((t, ti) => {
+        if (t < SPEC.xRange[0] || t > SPEC.xRange[1]) return;
+        const px = xScale.fwd(t);
+        el("line", { class: "grid", x1: px, x2: px, y1: plot.y0, y2: plot.y1 }, svg);
+        const lbl = el("text", { class: "tick-label", x: px, y: plot.y0 + 16, "text-anchor": "middle" }, svg);
+        lbl.textContent = Array.isArray(SPEC.xTickLabels) ? (SPEC.xTickLabels[ti] || "") : xFmt(t);
+      });
+
+      // axes
+      el("line", { class: "axis", x1: plot.x0, x2: plot.x1, y1: plot.y0, y2: plot.y0 }, svg);
+      el("line", { class: "axis", x1: plot.x0, x2: plot.x0, y1: plot.y0, y2: plot.y1 }, svg);
+
+      // background series
+      (SPEC.background || []).forEach(series => {
+        const pts = [];
+        for (let i = 0; i < series.x.length; i++) {
+          pts.push(`${xScale.fwd(series.x[i])},${yScale.fwd(series.y[i])}`);
+        }
+        if (series.fill) {
+          const area = `M ${xScale.fwd(series.x[0])},${plot.y0} L ` + pts.join(" L ") +
+            ` L ${xScale.fwd(series.x[series.x.length - 1])},${plot.y0} Z`;
+          el("path", { d: area, fill: series.fillColor || "rgba(66,133,244,0.12)", stroke: "none" }, svg);
+        }
+        el("polyline", {
+          points: pts.join(" "),
+          fill: "none",
+          stroke: series.color || "#9aa0a6",
+          "stroke-width": series.width || 2,
+          "stroke-dasharray": series.dash || "0",
+          opacity: series.opacity !== undefined ? series.opacity : 1,
+        }, svg);
+      });
+
+      // connecting line through anchors (edited curve preview)
+      if (SPEC.connectAnchors !== false && anchors.length > 1) {
+        const sorted = anchors.slice().sort((a, b) => a.x - b.x);
+        const pts = sorted.map(a => `${xScale.fwd(a.x)},${yScale.fwd(a.y)}`).join(" ");
+        el("polyline", {
+          points: pts, fill: "none",
+          stroke: SPEC.anchorLineColor || "#1a73e8", "stroke-width": 2.5, opacity: 0.9,
+        }, svg);
+      }
+
+      // anchors
+      anchors.forEach((a, i) => {
+        const cx = xScale.fwd(a.x), cy = yScale.fwd(a.y);
+        const g = el("g", { class: "anchor" + (i === dragIndex ? " dragging" : ""), "data-i": i }, svg);
+        el("circle", { cx, cy, r: 11, fill: "transparent" }, g); // hit area
+        el("circle", {
+          cx, cy, r: 6.5,
+          fill: a.color || SPEC.anchorColor || "#1a73e8",
+          stroke: "#ffffff", "stroke-width": 2,
+        }, g);
+        if (a.label) {
+          const t = el("text", { class: "tick-label", x: cx, y: cy - 12, "text-anchor": "middle" }, g);
+          t.textContent = a.label;
+        }
+      });
+
+      // titles / labels
+      if (SPEC.title) {
+        const t = el("text", { class: "title", x: plot.x0, y: 18 }, svg);
+        t.textContent = SPEC.title;
+      }
+      if (SPEC.xLabel) {
+        const t = el("text", { class: "axis-label", x: (plot.x0 + plot.x1) / 2, y: height - 8, "text-anchor": "middle" }, svg);
+        t.textContent = SPEC.xLabel;
+      }
+      if (SPEC.yLabel) {
+        const t = el("text", {
+          class: "axis-label", x: 14, y: (plot.y0 + plot.y1) / 2,
+          "text-anchor": "middle", transform: `rotate(-90 14 ${(plot.y0 + plot.y1) / 2})`,
+        }, svg);
+        t.textContent = SPEC.yLabel;
+      }
+      if (SPEC.hint) {
+        const t = el("text", { class: "hint", x: plot.x1, y: 18, "text-anchor": "end" }, svg);
+        t.textContent = SPEC.hint;
+      }
+
+      setFrameHeight(height + 4);
+    }
+
+    function formatNum(v) {
+      if (v === 0) return "0";
+      const a = Math.abs(v);
+      if (a >= 1000 || a < 0.01) return v.toPrecision(3);
+      return (Math.round(v * 1000) / 1000).toString();
+    }
+
+    // ----- interaction -------------------------------------------------------
+    function eventToData(evt) {
+      const rect = svg.getBoundingClientRect();
+      const sx = svg.viewBox.baseVal.width / rect.width;
+      const sy = svg.viewBox.baseVal.height / rect.height;
+      const px = (evt.clientX - rect.left) * sx;
+      const py = (evt.clientY - rect.top) * sy;
+      return { px, py };
+    }
+
+    function findAnchor(px, py) {
+      let best = -1, bestD = 18 * 18;
+      anchors.forEach((a, i) => {
+        const dx = xScale.fwd(a.x) - px;
+        const dy = yScale.fwd(a.y) - py;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; best = i; }
+      });
+      return best;
+    }
+
+    function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+    function onDown(evt) {
+      if (!SPEC) return;
+      const { px, py } = eventToData(evt);
+      const i = findAnchor(px, py);
+      if (i < 0) return;
+      dragIndex = i;
+      evt.preventDefault();
+      render();
+    }
+
+    function onMove(evt) {
+      if (dragIndex < 0) return;
+      evt.preventDefault();
+      const { px, py } = eventToData(evt);
+      const a = anchors[dragIndex];
+      const axis = SPEC.dragAxis || "y";
+      if (axis === "x" || axis === "xy") {
+        let nx = clamp(xScale.inv(px), SPEC.xRange[0], SPEC.xRange[1]);
+        if (SPEC.monotonicX) {
+          const eps = (SPEC.xRange[1] - SPEC.xRange[0]) * 1e-3;
+          const lo = dragIndex > 0 ? anchors[dragIndex - 1].x + eps : SPEC.xRange[0];
+          const hi = dragIndex < anchors.length - 1 ? anchors[dragIndex + 1].x - eps : SPEC.xRange[1];
+          nx = clamp(nx, lo, hi);
+        }
+        a.x = nx;
+      }
+      if (axis === "y" || axis === "xy") {
+        a.y = clamp(yScale.inv(py), SPEC.yRange[0], SPEC.yRange[1]);
+      }
+      render();
+    }
+
+    function onUp() {
+      if (dragIndex < 0) return;
+      const lastId = anchors[dragIndex].id;
+      dragIndex = -1;
+      EVENT += 1;
+      setValue({
+        anchors: anchors.map(a => ({ id: a.id, x: a.x, y: a.y })),
+        lastId: lastId,
+        event: EVENT,
+      });
+      render();
+    }
+
+    svg.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    svg.addEventListener("touchstart", e => onDown(e.touches[0]), { passive: false });
+    window.addEventListener("touchmove", e => { if (dragIndex >= 0) onMove(e.touches[0]); }, { passive: false });
+    window.addEventListener("touchend", onUp);
+    window.addEventListener("resize", () => render());
+
+    // ----- Streamlit render hook --------------------------------------------
+    function onRender(event) {
+      const data = event.data;
+      if (!data || data.type !== "streamlit:render") return;
+      const newSpec = data.args.spec;
+      if (!newSpec) return;
+      SPEC = newSpec;
+      // Adopt server-authoritative anchors unless the user is mid-drag.
+      if (dragIndex < 0) {
+        anchors = (SPEC.anchors || []).map(a => Object.assign({}, a));
+      }
+      render();
+    }
+
+    window.addEventListener("message", onRender);
+    send("streamlit:componentReady", { apiVersion: 1 });
+  </script>
+</body>
+</html>
