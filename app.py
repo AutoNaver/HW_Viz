@@ -68,8 +68,10 @@ def distribution_surface_figure(
         indices = np.unique(np.linspace(1, len(times) - 1, max_horizons).round().astype(int))
     selected_times = times[indices]
     fits = [fit_distribution_from_quantiles(anchor_levels, surface[i]) for i in indices]
-    low = min(fit.value_grid[0] for fit in fits)
-    high = max(fit.value_grid[-1] for fit in fits)
+    p05_idx = int(np.argmin(np.abs(anchor_levels - 0.05)))
+    p95_idx = int(np.argmin(np.abs(anchor_levels - 0.95)))
+    low = min(surface[i, p05_idx] for i in indices)
+    high = max(surface[i, p95_idx] for i in indices)
     value_grid = np.linspace(low, high, value_points)
     density = np.empty((value_points, indices.size), dtype=float)
     for column, fit in enumerate(fits):
